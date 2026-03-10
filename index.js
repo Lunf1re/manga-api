@@ -290,14 +290,12 @@ module.exports = async (req, res) => {
         if (!first || !first.data) return [];
         const total = first.total || first.data.length;
         let all = [...first.data];
-        // Sequential fetching — MangaDex bans IPs that fire parallel requests
+        // Cap at 2 pages (1000 chapters) to stay within Vercel 10s timeout
+        // Sequential with 200ms gap to avoid MangaDex rate limiting
         if (total > 500) {
-          const pages = Math.ceil(total / 500);
-          for (let i = 1; i < pages; i++) {
-            await new Promise(r => setTimeout(r, 250)); // 250ms gap = safe under 5req/s
-            const r = await mdx(`/manga/${id}/feed?limit=500&offset=${i*500}&order[chapter]=desc` + langFilter);
-            if (r && r.data) all = all.concat(r.data);
-          }
+          await new Promise(r => setTimeout(r, 200));
+          const r2 = await mdx(`/manga/${id}/feed?limit=500&offset=500&order[chapter]=desc` + langFilter);
+          if (r2 && r2.data) all = all.concat(r2.data);
         }
         return all;
       }
