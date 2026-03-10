@@ -2,7 +2,7 @@ const axios = require("axios");
 const { URL } = require("url");
 
 const MDX    = "https://api.mangadex.org";
-const COMICK = "https://api.comick.fun";
+const COMICK = "https://api.comick.io";
 const http   = axios.create({ timeout: 9000 }); // Vercel Hobby = 10s max
 
 /* ── CORS ────────────────────────────────────────────────────── */
@@ -353,7 +353,7 @@ module.exports = async (req, res) => {
       }
 
       /* MangaDex chapters — use retry */
-      const data = await mdxRetry(`/at-home/server/${id}?forcePort443=true`);
+      const data = await mdxRetry(`/at-home/server/${id}`);
       if (!data) return res.status(500).json({ error: "MangaDex at-home server unreachable", id });
       if (!data.chapter) return res.status(500).json({ error: "MangaDex chapter data missing", id, keys: Object.keys(data) });
 
