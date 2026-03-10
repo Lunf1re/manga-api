@@ -357,15 +357,37 @@ module.exports = async (req, res) => {
 
       if (!useFiles.length) return res.status(500).json({ error: "No pages found", id, chapter: data.chapter });
 
-      const images = useFiles.map((f, i) => ({
-        img:      `${baseUrl}/${usePath}/${useHash}/${f}`,
-        fallback: saverFiles[i] && usePath === "data"
-                    ? `${baseUrl}/data-saver/${useHash}/${saverFiles[i]}`
-                    : null,
-        page:     i + 1,
-      }));
+      const images = useFiles.map((f, i) => {
+        const direct   = `${baseUrl}/${usePath}/${useHash}/${f}`;
+        const saver    = saverFiles[i] && usePath === "data"
+                           ? `${baseUrl}/data-saver/${useHash}/${saverFiles[i]}`
+                           : null;
+        return {
+          img:      `/img?url=${encodeURIComponent(direct)}`,
+          fallback: saver ? `/img?url=${encodeURIComponent(saver)}` : null,
+          page:     i + 1,
+        };
+      });
 
       return res.json(images);
+    }
+
+    /* IMAGE PROXY */
+    if (url === "/img") {
+      const imgUrl = p.url;
+      if (!imgUrl) return res.status(400).json({ error: "Missing url param" });
+      try {
+        const r = await http.get(imgUrl, {
+          responseType: "arraybuffer",
+          headers: { "Referer": "https://mangadex.org/", "User-Agent": "Mozilla/5.0" },
+        });
+        const ct = r.headers["content-type"] || "image/jpeg";
+        res.setHeader("Content-Type", ct);
+        res.setHeader("Cache-Control", "public, max-age=3600");
+        return res.send(Buffer.from(r.data));
+      } catch (e) {
+        return res.status(502).json({ error: "Image fetch failed", detail: e.message });
+      }
     }
 
     return res.status(404).json({ error:"Not found" });
