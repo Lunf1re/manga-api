@@ -11,14 +11,11 @@ const MKK    = "https://www.mangakakalot.gg";
 
 const BROWSER_UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36";
 
-// Two clients: fast (5s) for API/JSON calls, slow (8s) for image streaming
 const api  = axios.create({ timeout: 5000 });
 const imgs = axios.create({ timeout: 8000 });
 
 /* ═══════════════════════════════════════════════════════════════
    IN-MEMORY CACHE
-   Vercel keeps functions warm between requests — this works great.
-   TTLs: list/genre = 5min, manga detail = 10min, chapters = 10min
 ═══════════════════════════════════════════════════════════════ */
 const cache = new Map();
 
@@ -30,7 +27,6 @@ function cacheGet(key) {
 }
 
 function cacheSet(key, val, ttlMs) {
-  // Keep cache bounded — evict oldest if over 200 entries
   if (cache.size >= 200) {
     const oldest = [...cache.entries()].sort((a, b) => a[1].exp - b[1].exp)[0];
     if (oldest) cache.delete(oldest[0]);
@@ -38,8 +34,6 @@ function cacheSet(key, val, ttlMs) {
   cache.set(key, { val, exp: Date.now() + ttlMs });
 }
 
-// In-flight deduplication: if two requests for the same key arrive simultaneously,
-// the second one waits for the first's promise instead of firing a duplicate fetch
 const inflight = new Map();
 
 async function withCache(key, ttlMs, fn) {
@@ -50,7 +44,7 @@ async function withCache(key, ttlMs, fn) {
     if (val !== null && val !== undefined) cacheSet(key, val, ttlMs);
     inflight.delete(key);
     return val;
-  }).catch(e => { inflight.delete(key); return null; });
+  }).catch(e => { inflight.delete(key); throw e; }); // FIX: rethrow instead of swallowing errors
   inflight.set(key, promise);
   return promise;
 }
@@ -151,7 +145,6 @@ function mseeExtractArr(html, varName) {
   } catch { return null; }
 }
 
-// MangaSee catalogue — 30min cache, in-memory across warm invocations
 async function getMseeCatalogue() {
   return withCache("msee:cat", 30 * 60 * 1000, async () => {
     const html = await mseeGet("/search/");
@@ -277,8 +270,6 @@ const TAGS = {
   "magic":"a1f53773-c69a-4ce5-8cab-fffcd90b1565","harem":"aafb99c1-7f60-43fa-b75f-fc9502ce29c7",
   "monsters":"36fd93ea-e8b8-445e-b836-358f02b3d33d","survival":"5fff9cde-849c-4d78-aab0-0d52b2ee1d25",
   "time-travel":"292e862b-2d17-4062-90a2-0356caa4ae27",
-  // Adult / explicit tags (MangaDex uses contentRating for these)
-  "ecchi":       "b29d6a3d-1569-4e7a-8caf-7557bc92cd5d",
   "yuri":        "a3c67850-4684-404e-9b7f-c69850ee5da6",
   "yaoi":        "320831a8-4026-470b-94f6-8353740e6f04",
   "music":       "f42fbf9e-188a-46cb-a301-21c36a9006b6",
@@ -324,7 +315,7 @@ module.exports = async (req, res) => {
         ]);
         const total = Math.min(Math.ceil(((mdxData?.total) || 200) / 20), 50);
         return { mangas, currentPage: page, totalPages: total, hasNextPage: page < total };
-      });
+      }).catch(() => null);
 
       return res.json(result || { mangas: [], currentPage: page, totalPages: 1, hasNextPage: false });
     }
@@ -338,7 +329,6 @@ module.exports = async (req, res) => {
       const ckey   = `search:${q.toLowerCase()}:${page}`;
 
       const result = await withCache(ckey, 3 * 60 * 1000, async () => {
-        // Fire MDX + ComicK + MangaSee catalogue in parallel
         const [mdxData, ckData, mseeCatalogue] = await Promise.all([
           mdx(`/manga?limit=20&offset=${offset}&title=${encodeURIComponent(q)}&includes[]=cover_art&contentRating[]=safe&contentRating[]=suggestive&order[relevance]=desc`),
           comick(`/v1.0/search?q=${encodeURIComponent(q)}&limit=10`),
@@ -355,7 +345,7 @@ module.exports = async (req, res) => {
         ]);
         const total = Math.max(1, Math.ceil(((mdxData?.total) || mangas.length) / 20));
         return { mangas, currentPage: page, totalPages: total, hasNextPage: page < total };
-      });
+      }).catch(() => null);
 
       return res.json(result || { mangas: [], currentPage: page, totalPages: 1, hasNextPage: false });
     }
@@ -368,30 +358,29 @@ module.exports = async (req, res) => {
       const ckey   = `genre:${genre}:${page}`;
 
       const result = await withCache(ckey, 5 * 60 * 1000, async () => {
-        // Adult genres need explicit/erotica content ratings unlocked
-      const ADULT_GENRES = new Set(["hentai","ecchi","yuri","yaoi","adult-action","nsfw-romance"]);
-      let extra = "";
-      let contentRatings = "&contentRating[]=safe&contentRating[]=suggestive";
-      if (ADULT_GENRES.has(genre)) {
-        contentRatings = "&contentRating[]=safe&contentRating[]=suggestive&contentRating[]=erotica&contentRating[]=pornographic";
-      }
-      if (DEMOGRAPHICS[genre]) {
-        extra = `&publicationDemographic[]=${DEMOGRAPHICS[genre]}`;
-      } else if (genre === "hentai") {
-        extra = `&contentRating[]=pornographic&contentRating[]=erotica`;
-        contentRatings = ""; // already set above
-      } else if (genre === "adult-action") {
-        extra = `&includedTags[]=${TAGS["action"]}`;
-      } else if (genre === "nsfw-romance") {
-        extra = `&includedTags[]=${TAGS["romance"]}`;
-      } else if (TAGS[genre]) {
-        extra = `&includedTags[]=${TAGS[genre]}`;
-      }
-      const mdxData = await mdx(`/manga?limit=20&offset=${offset}&order[followedCount]=desc&includes[]=cover_art${contentRatings}${extra}`);
+        const ADULT_GENRES = new Set(["hentai","ecchi","yuri","yaoi","adult-action","nsfw-romance"]);
+        let extra = "";
+        let contentRatings = "&contentRating[]=safe&contentRating[]=suggestive";
+        if (ADULT_GENRES.has(genre)) {
+          contentRatings = "&contentRating[]=safe&contentRating[]=suggestive&contentRating[]=erotica&contentRating[]=pornographic";
+        }
+        if (DEMOGRAPHICS[genre]) {
+          extra = `&publicationDemographic[]=${DEMOGRAPHICS[genre]}`;
+        } else if (genre === "hentai") {
+          extra = `&contentRating[]=pornographic&contentRating[]=erotica`;
+          contentRatings = "";
+        } else if (genre === "adult-action") {
+          extra = `&includedTags[]=${TAGS["action"]}`;
+        } else if (genre === "nsfw-romance") {
+          extra = `&includedTags[]=${TAGS["romance"]}`;
+        } else if (TAGS[genre]) {
+          extra = `&includedTags[]=${TAGS[genre]}`;
+        }
+        const mdxData = await mdx(`/manga?limit=20&offset=${offset}&order[followedCount]=desc&includes[]=cover_art${contentRatings}${extra}`);
         const mangas  = ((mdxData?.data || []).map(fmt).filter(Boolean));
         const total   = Math.min(Math.ceil(((mdxData?.total) || 20) / 20), 50);
         return { mangas, currentPage: page, totalPages: total, hasNextPage: page < total };
-      });
+      }).catch(() => null);
 
       return res.json(result || { mangas: [], currentPage: page, totalPages: 1, hasNextPage: false });
     }
@@ -455,7 +444,6 @@ module.exports = async (req, res) => {
           const first = await mdx(`/manga/${id}/feed?limit=500&offset=0&order[chapter]=desc${langFilter}`);
           if (!first?.data) return [];
           let all = [...first.data];
-          // Only fetch page 2 if needed — no sleep since we're not parallel
           if ((first.total || 0) > 500) {
             const r2 = await mdx(`/manga/${id}/feed?limit=500&offset=500&order[chapter]=desc${langFilter}`);
             if (r2?.data) all = all.concat(r2.data);
@@ -463,7 +451,6 @@ module.exports = async (req, res) => {
           return all;
         }
 
-        // Fetch manga info and chapters in parallel
         const [mangaData, rawChapters] = await Promise.all([
           mdx(`/manga/${id}?includes[]=cover_art`),
           fetchChaps(`&translatedLanguage[]=${lang}`),
@@ -472,7 +459,6 @@ module.exports = async (req, res) => {
         const base = fmt(mangaData?.data);
         if (!base) return null;
 
-        // Strict dedup — only keep requested language
         const seen = new Map();
         rawChapters.forEach(c => {
           const chLang = c.attributes.translatedLanguage || "";
@@ -491,7 +477,7 @@ module.exports = async (req, res) => {
           }));
 
         return { ...base, chapters, chapterPages: 1 };
-      });
+      }).catch(() => null);
 
       if (!result) return res.status(404).json({ error: "Manga not found" });
       return res.json(result);
@@ -502,83 +488,134 @@ module.exports = async (req, res) => {
       const raw  = decodeURIComponent(url.replace("/chapter/", ""));
       const ckey = `chapter:${raw}`;
 
-      const result = await withCache(ckey, 10 * 60 * 1000, async () => {
-
-        /* ComicK — direct CDN URLs, no proxy needed */
-        if (raw.startsWith("ck:")) {
-          const id   = raw.replace("ck:", "");
-          const data = await comick(`/chapter/${id}`);
-          if (!data) return null;
-          const imgList = (data.chapter?.md_images || data.chapter?.images || data.images || []);
-          if (!imgList.length) return null;
-          return imgList.map((img, i) => {
-            const key = typeof img === "string" ? img : (img.b2key || img.name || "");
-            return { img: `https://meo.comick.pictures/${key}`, page: i + 1 };
-          }).filter(x => x.img !== "https://meo.comick.pictures/");
-        }
-
-        /* MangaSee */
-        if (raw.startsWith("msee:")) {
-          const parts    = raw.split(":");
-          const slug     = parts[1];
-          const chEnc    = parts[2];
-          const chNum    = mseeDecodeChapter(chEnc);
-          const html     = await mseeGet(`/read-online/${slug}-chapter-${chNum}.html`);
-          if (!html) return null;
-          const pathName = mseeExtractVar(html, "vm\\.CurPathName");
-          const curChap  = mseeExtractObj(html, "vm\\.CurChapter");
-          const pages    = parseInt(curChap?.Page || "0", 10);
-          if (!pathName || !pages) return null;
-          const refEnc = encodeURIComponent(`${MSEE}/read-online/${slug}-chapter-${chNum}.html`);
-          return Array.from({ length: pages }, (_, i) => ({
-            img:  `/img?url=${encodeURIComponent(mseeImgUrl(pathName, slug, chEnc, i + 1))}&ref=${refEnc}`,
-            page: i + 1,
-          }));
-        }
-
-        /* Mangakakalot */
-        if (raw.startsWith("mkk:")) {
-          const chapterId = raw.replace("mkk:", "");
-          const mangaSlug = chapterId.split("/")[0];
-          const html = await mkkGet(`/chapter/${chapterId}`, `${MKK}/manga/${mangaSlug}`);
-          if (!html) return null;
-          const imgUrls = mkkImages(html);
-          if (!imgUrls.length) return null;
-          return imgUrls.map((imgUrl, i) => ({
-            img:  `/img?url=${encodeURIComponent(imgUrl)}&ref=${encodeURIComponent(MKK)}`,
-            page: i + 1,
-          }));
-        }
-
-        /* MangaDex */
-        const id   = raw.replace(/^mdx:/, "");
-        let data   = await mdx(`/at-home/server/${id}`);
-        if (!data?.chapter) {
-          await new Promise(r => setTimeout(r, 400));
-          data = await mdx(`/at-home/server/${id}`);
-        }
-        if (!data?.chapter) return null;
-
-        const baseUrl    = data.baseUrl;
-        const hash       = data.chapter.hash;
-        const fullFiles  = data.chapter.data || [];
-        const saverFiles = data.chapter.dataSaver || [];
-        const useFiles   = fullFiles.length ? fullFiles : saverFiles;
-        const usePath    = fullFiles.length ? "data" : "data-saver";
-        if (!useFiles.length) return null;
-
-        return useFiles.map((f, i) => {
-          const direct = `${baseUrl}/${usePath}/${hash}/${f}`;
-          const saver  = saverFiles[i] && usePath === "data" ? `${baseUrl}/data-saver/${hash}/${saverFiles[i]}` : null;
-          return {
-            img:      `/img?url=${encodeURIComponent(direct)}`,
-            fallback: saver ? `/img?url=${encodeURIComponent(saver)}` : null,
-            page:     i + 1,
-          };
+      // Guard against missing / null IDs
+      if (!raw || raw === "undefined" || raw === "null") {
+        return res.status(400).json({
+          error: "Missing chapter ID",
+          hint: "Pass a chapter ID from the chapters list (e.g. mdx:<uuid>), not a manga ID.",
         });
-      });
+      }
 
-      if (!result) return res.status(500).json({ error: "Chapter not found or unavailable", id: raw });
+      let result;
+      try {
+        result = await withCache(ckey, 10 * 60 * 1000, async () => {
+
+          /* ComicK */
+          if (raw.startsWith("ck:")) {
+            const id   = raw.replace("ck:", "");
+            const data = await comick(`/chapter/${id}`);
+            if (!data) return null;
+            const imgList = (data.chapter?.md_images || data.chapter?.images || data.images || []);
+            if (!imgList.length) return null;
+            return imgList.map((img, i) => {
+              const key = typeof img === "string" ? img : (img.b2key || img.name || "");
+              return { img: `https://meo.comick.pictures/${key}`, page: i + 1 };
+            }).filter(x => x.img !== "https://meo.comick.pictures/");
+          }
+
+          /* MangaSee */
+          if (raw.startsWith("msee:")) {
+            const parts    = raw.split(":");
+            const slug     = parts[1];
+            const chEnc    = parts[2];
+            const chNum    = mseeDecodeChapter(chEnc);
+            const html     = await mseeGet(`/read-online/${slug}-chapter-${chNum}.html`);
+            if (!html) return null;
+            const pathName = mseeExtractVar(html, "vm\\.CurPathName");
+            const curChap  = mseeExtractObj(html, "vm\\.CurChapter");
+            const pages    = parseInt(curChap?.Page || "0", 10);
+            if (!pathName || !pages) return null;
+            const refEnc = encodeURIComponent(`${MSEE}/read-online/${slug}-chapter-${chNum}.html`);
+            return Array.from({ length: pages }, (_, i) => ({
+              img:  `/img?url=${encodeURIComponent(mseeImgUrl(pathName, slug, chEnc, i + 1))}&ref=${refEnc}`,
+              page: i + 1,
+            }));
+          }
+
+          /* Mangakakalot */
+          if (raw.startsWith("mkk:")) {
+            const chapterId = raw.replace("mkk:", "");
+            const mangaSlug = chapterId.split("/")[0];
+            const html = await mkkGet(`/chapter/${chapterId}`, `${MKK}/manga/${mangaSlug}`);
+            if (!html) return null;
+            const imgUrls = mkkImages(html);
+            if (!imgUrls.length) return null;
+            return imgUrls.map((imgUrl, i) => ({
+              img:  `/img?url=${encodeURIComponent(imgUrl)}&ref=${encodeURIComponent(MKK)}`,
+              page: i + 1,
+            }));
+          }
+
+          /* MangaDex */
+          const id = raw.replace(/^mdx:/, "");
+
+          // FIX: Validate UUID format — catches manga IDs being passed by mistake
+          const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+          if (!UUID_RE.test(id)) {
+            throw new Error(`Invalid chapter ID: "${id}". Expected a UUID chapter ID from the chapters list.`);
+          }
+
+          // First attempt
+          let data = await mdx(`/at-home/server/${id}`);
+
+          // FIX: Improved retry — 1s then 2s delay (was 400ms, not enough for MDX rate limits)
+          if (!data?.chapter) {
+            console.warn(`MDX at-home miss for ${id}, retry 1 in 1s...`);
+            await new Promise(r => setTimeout(r, 1000));
+            data = await mdx(`/at-home/server/${id}`);
+          }
+
+          if (!data?.chapter) {
+            console.warn(`MDX at-home miss for ${id}, retry 2 in 2s...`);
+            await new Promise(r => setTimeout(r, 2000));
+            data = await mdx(`/at-home/server/${id}`);
+          }
+
+          if (!data?.chapter) {
+            throw new Error(`MangaDex returned no data for chapter "${id}". It may have been removed or you passed a manga ID instead of a chapter ID.`);
+          }
+
+          const baseUrl    = data.baseUrl;
+          const hash       = data.chapter.hash;
+          const fullFiles  = data.chapter.data || [];
+          const saverFiles = data.chapter.dataSaver || [];
+          const useFiles   = fullFiles.length ? fullFiles : saverFiles;
+          const usePath    = fullFiles.length ? "data" : "data-saver";
+
+          if (!useFiles.length) {
+            throw new Error(`Chapter "${id}" has no image files.`);
+          }
+
+          return useFiles.map((f, i) => {
+            const direct = `${baseUrl}/${usePath}/${hash}/${f}`;
+            const saver  = saverFiles[i] && usePath === "data" ? `${baseUrl}/data-saver/${hash}/${saverFiles[i]}` : null;
+            return {
+              img:      `/img?url=${encodeURIComponent(direct)}`,
+              fallback: saver ? `/img?url=${encodeURIComponent(saver)}` : null,
+              page:     i + 1,
+            };
+          });
+        });
+      } catch (e) {
+        console.error("Chapter fetch error:", e.message);
+        // FIX: Use 404 for "not found" cases — 500 was misleading
+        const isNotFound = e.message?.toLowerCase().includes("no data")
+          || e.message?.toLowerCase().includes("removed")
+          || e.message?.toLowerCase().includes("invalid chapter");
+        return res.status(isNotFound ? 404 : 500).json({
+          error: e.message || "Chapter not found or unavailable",
+          id: raw,
+          hint: "Make sure you are passing a chapter ID (from the chapters list), not a manga ID.",
+        });
+      }
+
+      if (!result) {
+        return res.status(404).json({
+          error: "Chapter not found or unavailable",
+          id: raw,
+          hint: "The chapter may have been removed, or a manga ID was passed instead of a chapter ID.",
+        });
+      }
       return res.json(result);
     }
 
