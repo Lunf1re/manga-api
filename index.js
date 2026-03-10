@@ -657,13 +657,19 @@ module.exports = async (req, res) => {
             throw new Error(`Chapter "${id}" has no image files on MangaDex and ComicK fallback failed.`);
           }
 
+          // Return DIRECT CDN URLs — do NOT proxy through /img for MangaDex.
+          // Vercel shared IPs get rate-limited by MangaDex; the browser fetches
+          // directly without that issue. MangaDex CDN allows cross-origin requests.
           return useFiles.map((f, i) => {
             const direct = `${baseUrl}/${usePath}/${hash}/${f}`;
-            const saver  = saverFiles[i] && usePath === "data" ? `${baseUrl}/data-saver/${hash}/${saverFiles[i]}` : null;
+            const saver  = saverFiles[i] && usePath === "data"
+              ? `${baseUrl}/data-saver/${hash}/${saverFiles[i]}`
+              : (saverFiles[i] ? `${baseUrl}/data-saver/${hash}/${saverFiles[i]}` : null);
             return {
-              img:      `/img?url=${encodeURIComponent(direct)}`,
-              fallback: saver ? `/img?url=${encodeURIComponent(saver)}` : null,
+              img:      direct,           // direct CDN URL — browser fetches this
+              fallback: saver || null,    // data-saver as fallback
               page:     i + 1,
+              direct:   true,             // flag: frontend should NOT prepend API base
             };
           });
         });
