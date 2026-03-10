@@ -282,37 +282,49 @@ module.exports = async (req, res) => {
 
       /* MangaDex manga detail */
       const id = rawId.replace(/^mdx:/, "");
-      const [mangaData, feed] = await Promise.all([
+
+      // Helper: fetch ALL chapter pages for a given language filter
+      async function fetchAllChapters(langFilter) {
+        const firstUrl = `/manga/${id}/feed?limit=500&offset=0&order[chapter]=desc` + langFilter;
+        const first = await mdx(firstUrl);
+        if (!first || !first.data) return [];
+        const total = first.total || first.data.length;
+        let all = [...first.data];
+        if (total > 500) {
+          const pages = Math.ceil(total / 500);
+          const rest = await Promise.all(
+            Array.from({length: pages - 1}, (_, i) =>
+              mdx(`/manga/${id}/feed?limit=500&offset=${(i+1)*500}&order[chapter]=desc` + langFilter)
+            )
+          );
+          rest.forEach(r => { if (r && r.data) all = all.concat(r.data); });
+        }
+        return all;
+      }
+
+      const [mangaData, rawChapters] = await Promise.all([
         mdx(`/manga/${id}?includes[]=cover_art`),
-        mdx(`/manga/${id}/feed?limit=500&offset=${offset}&order[chapter]=desc&translatedLanguage[]=${lang}`),
+        fetchAllChapters(`&translatedLanguage[]=${lang}`),
       ]);
 
       const base = fmt(mangaData && mangaData.data);
       if (!base) return res.status(404).json({ error:"Manga not found" });
 
-      let chapters = ((feed && feed.data) || []).map(c => ({
+      let chapterData = rawChapters;
+
+      // No chapters in requested lang → fall back to ALL languages
+      if (chapterData.length === 0) {
+        chapterData = await fetchAllChapters("");
+      }
+
+      const chapters = chapterData.map(c => ({
         id:   "mdx:" + c.id,
         name: "Chapter " + (c.attributes.chapter || "?"),
         date: c.attributes.publishAt ? c.attributes.publishAt.split("T")[0] : "",
         lang: c.attributes.translatedLanguage || "",
       }));
 
-      // No chapters in requested lang → fall back to ALL languages
-      if (chapters.length === 0) {
-        const all = await mdx(`/manga/${id}/feed?limit=500&offset=${offset}&order[chapter]=desc`);
-        chapters = ((all && all.data) || []).map(c => ({
-          id:   "mdx:" + c.id,
-          name: "Chapter " + (c.attributes.chapter || "?"),
-          date: c.attributes.publishAt ? c.attributes.publishAt.split("T")[0] : "",
-          lang: c.attributes.translatedLanguage || "",
-        }));
-      }
-
-      return res.json({
-        ...base,
-        chapters,
-        chapterPages: Math.ceil(((feed && feed.total) || chapters.length) / 100) || 1,
-      });
+      return res.json({ ...base, chapters, chapterPages: 1 });
     }
 
 
@@ -372,19 +384,25 @@ module.exports = async (req, res) => {
       return res.json(images);
     }
 
-    /* IMAGE PROXY */
+    /* IMAGE PROXY — stream to avoid buffering timeout */
     if (url === "/img") {
       const imgUrl = p.url;
       if (!imgUrl) return res.status(400).json({ error: "Missing url param" });
       try {
         const r = await http.get(imgUrl, {
-          responseType: "arraybuffer",
-          headers: { "Referer": "https://mangadex.org/", "User-Agent": "Mozilla/5.0" },
+          responseType: "stream",
+          timeout: 8000,
+          headers: {
+            "Referer":    "https://mangadex.org/",
+            "User-Agent": "Mozilla/5.0",
+          },
         });
         const ct = r.headers["content-type"] || "image/jpeg";
         res.setHeader("Content-Type", ct);
-        res.setHeader("Cache-Control", "public, max-age=3600");
-        return res.send(Buffer.from(r.data));
+        res.setHeader("Cache-Control", "public, max-age=86400");
+        res.setHeader("Access-Control-Allow-Origin", "*");
+        r.data.pipe(res);
+        return;
       } catch (e) {
         return res.status(502).json({ error: "Image fetch failed", detail: e.message });
       }
