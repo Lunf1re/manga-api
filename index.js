@@ -283,21 +283,21 @@ module.exports = async (req, res) => {
       /* MangaDex manga detail */
       const id = rawId.replace(/^mdx:/, "");
 
-      // Helper: fetch ALL chapter pages for a given language filter
+      // Helper: fetch ALL chapter pages sequentially (avoid rate limiting)
       async function fetchAllChapters(langFilter) {
         const firstUrl = `/manga/${id}/feed?limit=500&offset=0&order[chapter]=desc` + langFilter;
         const first = await mdx(firstUrl);
         if (!first || !first.data) return [];
         const total = first.total || first.data.length;
         let all = [...first.data];
+        // Sequential fetching — MangaDex bans IPs that fire parallel requests
         if (total > 500) {
           const pages = Math.ceil(total / 500);
-          const rest = await Promise.all(
-            Array.from({length: pages - 1}, (_, i) =>
-              mdx(`/manga/${id}/feed?limit=500&offset=${(i+1)*500}&order[chapter]=desc` + langFilter)
-            )
-          );
-          rest.forEach(r => { if (r && r.data) all = all.concat(r.data); });
+          for (let i = 1; i < pages; i++) {
+            await new Promise(r => setTimeout(r, 250)); // 250ms gap = safe under 5req/s
+            const r = await mdx(`/manga/${id}/feed?limit=500&offset=${i*500}&order[chapter]=desc` + langFilter);
+            if (r && r.data) all = all.concat(r.data);
+          }
         }
         return all;
       }
@@ -317,7 +317,22 @@ module.exports = async (req, res) => {
         chapterData = await fetchAllChapters("");
       }
 
-      const chapters = chapterData.map(c => ({
+      // Deduplicate: one chapter per number per language, sorted desc
+      const seen = new Map();
+      chapterData.forEach(c => {
+        const chNum = c.attributes.chapter || "?";
+        const chLang = c.attributes.translatedLanguage || "";
+        const key = `${chLang}:::${chNum}`;
+        if (!seen.has(key)) seen.set(key, c);
+      });
+      const deduped = Array.from(seen.values());
+      deduped.sort((a, b) => {
+        const na = parseFloat(a.attributes.chapter) || 0;
+        const nb = parseFloat(b.attributes.chapter) || 0;
+        return nb - na;
+      });
+
+      const chapters = deduped.map(c => ({
         id:   "mdx:" + c.id,
         name: "Chapter " + (c.attributes.chapter || "?"),
         date: c.attributes.publishAt ? c.attributes.publishAt.split("T")[0] : "",
@@ -352,16 +367,15 @@ module.exports = async (req, res) => {
         return res.json(images);
       }
 
-      /* MangaDex chapters — try up to 3 different server nodes */
-      let data = null;
-      for (let attempt = 0; attempt < 3; attempt++) {
+      /* MangaDex chapters — 2 quick attempts, short timeout */
+      let data = await mdx(`/at-home/server/${id}`);
+      if (!data || !data.chapter) {
+        await new Promise(r => setTimeout(r, 400));
         data = await mdx(`/at-home/server/${id}`);
-        if (data && data.chapter) break;
-        await new Promise(r => setTimeout(r, 600 * (attempt + 1)));
       }
 
       if (!data || !data.chapter) {
-        return res.status(500).json({ error: "MangaDex at-home server failed after 3 attempts", id });
+        return res.status(500).json({ error: "MangaDex at-home server unavailable", id });
       }
 
       const baseUrl    = data.baseUrl;
