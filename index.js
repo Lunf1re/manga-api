@@ -277,6 +277,12 @@ const TAGS = {
   "magic":"a1f53773-c69a-4ce5-8cab-fffcd90b1565","harem":"aafb99c1-7f60-43fa-b75f-fc9502ce29c7",
   "monsters":"36fd93ea-e8b8-445e-b836-358f02b3d33d","survival":"5fff9cde-849c-4d78-aab0-0d52b2ee1d25",
   "time-travel":"292e862b-2d17-4062-90a2-0356caa4ae27",
+  // Adult / explicit tags (MangaDex uses contentRating for these)
+  "ecchi":       "b29d6a3d-1569-4e7a-8caf-7557bc92cd5d",
+  "yuri":        "a3c67850-4684-404e-9b7f-c69850ee5da6",
+  "yaoi":        "320831a8-4026-470b-94f6-8353740e6f04",
+  "music":       "f42fbf9e-188a-46cb-a301-21c36a9006b6",
+  "medical":     "c8cbe35b-1b2b-4a3f-9c37-db84c4514331",
 };
 const DEMOGRAPHICS = { "shounen":"shounen","shoujo":"shoujo","seinen":"seinen","josei":"josei" };
 
@@ -362,9 +368,26 @@ module.exports = async (req, res) => {
       const ckey   = `genre:${genre}:${page}`;
 
       const result = await withCache(ckey, 5 * 60 * 1000, async () => {
-        const extra = DEMOGRAPHICS[genre] ? `&publicationDemographic[]=${DEMOGRAPHICS[genre]}`
-                    : TAGS[genre]         ? `&includedTags[]=${TAGS[genre]}` : "";
-        const mdxData = await mdx(listQ(offset, extra));
+        // Adult genres need explicit/erotica content ratings unlocked
+      const ADULT_GENRES = new Set(["hentai","ecchi","yuri","yaoi","adult-action","nsfw-romance"]);
+      let extra = "";
+      let contentRatings = "&contentRating[]=safe&contentRating[]=suggestive";
+      if (ADULT_GENRES.has(genre)) {
+        contentRatings = "&contentRating[]=safe&contentRating[]=suggestive&contentRating[]=erotica&contentRating[]=pornographic";
+      }
+      if (DEMOGRAPHICS[genre]) {
+        extra = `&publicationDemographic[]=${DEMOGRAPHICS[genre]}`;
+      } else if (genre === "hentai") {
+        extra = `&contentRating[]=pornographic&contentRating[]=erotica`;
+        contentRatings = ""; // already set above
+      } else if (genre === "adult-action") {
+        extra = `&includedTags[]=${TAGS["action"]}`;
+      } else if (genre === "nsfw-romance") {
+        extra = `&includedTags[]=${TAGS["romance"]}`;
+      } else if (TAGS[genre]) {
+        extra = `&includedTags[]=${TAGS[genre]}`;
+      }
+      const mdxData = await mdx(`/manga?limit=20&offset=${offset}&order[followedCount]=desc&includes[]=cover_art${contentRatings}${extra}`);
         const mangas  = ((mdxData?.data || []).map(fmt).filter(Boolean));
         const total   = Math.min(Math.ceil(((mdxData?.total) || 20) / 20), 50);
         return { mangas, currentPage: page, totalPages: total, hasNextPage: page < total };
