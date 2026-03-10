@@ -282,6 +282,21 @@ function listQ(offset, extra) {
     + `&contentRating[]=safe&contentRating[]=suggestive` + (extra || "");
 }
 
+
+/* ── ComicK genre slugs ───────────────────────────────────────── */
+const CK_GENRES = {
+  "action":"action","adventure":"adventure","comedy":"comedy","drama":"drama",
+  "fantasy":"fantasy","romance":"romance","horror":"horror","mystery":"mystery",
+  "sci-fi":"sci-fi","slice-of-life":"slice-of-life","sports":"sports",
+  "supernatural":"supernatural","thriller":"thriller","martial-arts":"martial-arts",
+  "historical":"historical","school-life":"school-life","ecchi":"ecchi",
+  "mecha":"mecha","psychological":"psychological","isekai":"isekai",
+  "magic":"magic","harem":"harem","monsters":"monster","survival":"survival",
+  "time-travel":"time-travel","music":"music","medical":"medical",
+  "shounen":"shounen","shoujo":"shoujo","seinen":"seinen","josei":"josei",
+  "yuri":"yuri","yaoi":"yaoi","cooking":"cooking","villainess":"villainess",
+};
+
 /* ═══════════════════════════════════════════════════════════════
    MAIN HANDLER
 ═══════════════════════════════════════════════════════════════ */
@@ -298,53 +313,32 @@ module.exports = async (req, res) => {
     /* ── ROOT ───────────────────────────────────────────────────── */
     if (url === "/") return res.json({ status: "ok", sources: ["MangaDex", "ComicK", "MangaSee", "Mangakakalot"], cacheSize: cache.size });
 
-    /* ── LIST ───────────────────────────────────────────────────── */
+    /* ── LIST — ComicK primary ─────────────────────────────────── */
     if (url === "/list" || url.startsWith("/list")) {
-      const page   = Math.max(1, parseInt(p.page) || 1);
-      const offset = (page - 1) * 20;
-      const ckey   = `list:${page}`;
+      const page  = Math.max(1, parseInt(p.page) || 1);
+      const ckey  = `list:ck:${page}`;
 
       const result = await withCache(ckey, 5 * 60 * 1000, async () => {
-        const [mdxData, ckData] = await Promise.all([
-          mdx(listQ(offset)),
-          comick(`/top?page=${page}`),
-        ]);
-        const mangas = dedup([
-          ...((mdxData?.data || []).map(fmt).filter(Boolean)),
-          ...((ckData?.rank   || []).map(fmtCk).filter(Boolean)),
-        ]);
-        const total = Math.min(Math.ceil(((mdxData?.total) || 200) / 20), 50);
-        return { mangas, currentPage: page, totalPages: total, hasNextPage: page < total };
+        const ckData = await comick(`/top?page=${page}`);
+        const mangas = dedup((ckData?.rank || []).map(fmtCk).filter(Boolean));
+        return { mangas, currentPage: page, totalPages: 50, hasNextPage: page < 50 };
       }).catch(() => null);
 
       return res.json(result || { mangas: [], currentPage: page, totalPages: 1, hasNextPage: false });
     }
 
-    /* ── SEARCH ─────────────────────────────────────────────────── */
+    /* ── SEARCH — ComicK primary ───────────────────────────────── */
     if (url.startsWith("/search")) {
       const q    = (p.q || "").trim();
       const page = Math.max(1, parseInt(p.page) || 1);
       if (!q) return res.json({ mangas: [], currentPage: 1, totalPages: 1, hasNextPage: false });
-      const offset = (page - 1) * 20;
-      const ckey   = `search:${q.toLowerCase()}:${page}`;
+      const ckey = `search:ck:${q.toLowerCase()}:${page}`;
 
       const result = await withCache(ckey, 3 * 60 * 1000, async () => {
-        const [mdxData, ckData, mseeCatalogue] = await Promise.all([
-          mdx(`/manga?limit=20&offset=${offset}&title=${encodeURIComponent(q)}&includes[]=cover_art&contentRating[]=safe&contentRating[]=suggestive&order[relevance]=desc`),
-          comick(`/v1.0/search?q=${encodeURIComponent(q)}&limit=10`),
-          getMseeCatalogue(),
-        ]);
-        const qLow = q.toLowerCase();
-        const mseeResults = (mseeCatalogue || [])
-          .filter(m => (m.s || "").toLowerCase().includes(qLow)).slice(0, 8)
-          .map(fmtMsee).filter(Boolean);
-        const mangas = dedup([
-          ...((mdxData?.data || []).map(fmt).filter(Boolean)),
-          ...((ckData         || []).slice(0, 10).map(fmtCk).filter(Boolean)),
-          ...mseeResults,
-        ]);
-        const total = Math.max(1, Math.ceil(((mdxData?.total) || mangas.length) / 20));
-        return { mangas, currentPage: page, totalPages: total, hasNextPage: page < total };
+        // ComicK search is fast, comprehensive, and works reliably
+        const ckData = await comick(`/v1.0/search?q=${encodeURIComponent(q)}&limit=20&page=${page}`);
+        const mangas = dedup((Array.isArray(ckData) ? ckData : []).map(fmtCk).filter(Boolean));
+        return { mangas, currentPage: page, totalPages: mangas.length === 20 ? page + 1 : page, hasNextPage: mangas.length === 20 };
       }).catch(() => null);
 
       return res.json(result || { mangas: [], currentPage: page, totalPages: 1, hasNextPage: false });
@@ -358,28 +352,26 @@ module.exports = async (req, res) => {
       const ckey   = `genre:${genre}:${page}`;
 
       const result = await withCache(ckey, 5 * 60 * 1000, async () => {
-        const ADULT_GENRES = new Set(["hentai","ecchi","yuri","yaoi","adult-action","nsfw-romance"]);
-        let extra = "";
-        let contentRatings = "&contentRating[]=safe&contentRating[]=suggestive";
-        if (ADULT_GENRES.has(genre)) {
-          contentRatings = "&contentRating[]=safe&contentRating[]=suggestive&contentRating[]=erotica&contentRating[]=pornographic";
+        // ComicK genre browsing — uses their genre slug API
+        const ckSlug = CK_GENRES[genre];
+        let mangas = [];
+        if (ckSlug) {
+          // ComicK top comics filtered by genre
+          const ckData = await comick(`/top?page=${page}&genre=${encodeURIComponent(ckSlug)}`);
+          mangas = dedup((ckData?.rank || []).map(fmtCk).filter(Boolean));
         }
-        if (DEMOGRAPHICS[genre]) {
-          extra = `&publicationDemographic[]=${DEMOGRAPHICS[genre]}`;
-        } else if (genre === "hentai") {
-          extra = `&contentRating[]=pornographic&contentRating[]=erotica`;
-          contentRatings = "";
-        } else if (genre === "adult-action") {
-          extra = `&includedTags[]=${TAGS["action"]}`;
-        } else if (genre === "nsfw-romance") {
-          extra = `&includedTags[]=${TAGS["romance"]}`;
-        } else if (TAGS[genre]) {
-          extra = `&includedTags[]=${TAGS[genre]}`;
+        // If ComicK genre didn't return results, fall back to MDX for that genre
+        if (!mangas.length) {
+          const ADULT_GENRES = new Set(["hentai","ecchi","yuri","yaoi","adult-action","nsfw-romance"]);
+          let extra = "";
+          let contentRatings = "&contentRating[]=safe&contentRating[]=suggestive";
+          if (ADULT_GENRES.has(genre)) contentRatings += "&contentRating[]=erotica&contentRating[]=pornographic";
+          if (DEMOGRAPHICS[genre]) extra = `&publicationDemographic[]=${DEMOGRAPHICS[genre]}`;
+          else if (TAGS[genre])    extra = `&includedTags[]=${TAGS[genre]}`;
+          const mdxData = await mdx(`/manga?limit=20&offset=${(page-1)*20}&order[followedCount]=desc&includes[]=cover_art${contentRatings}${extra}`);
+          mangas = ((mdxData?.data || []).map(fmt).filter(Boolean));
         }
-        const mdxData = await mdx(`/manga?limit=20&offset=${offset}&order[followedCount]=desc&includes[]=cover_art${contentRatings}${extra}`);
-        const mangas  = ((mdxData?.data || []).map(fmt).filter(Boolean));
-        const total   = Math.min(Math.ceil(((mdxData?.total) || 20) / 20), 50);
-        return { mangas, currentPage: page, totalPages: total, hasNextPage: page < total };
+        return { mangas, currentPage: page, totalPages: 50, hasNextPage: page < 50 };
       }).catch(() => null);
 
       return res.json(result || { mangas: [], currentPage: page, totalPages: 1, hasNextPage: false });
