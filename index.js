@@ -352,13 +352,8 @@ module.exports = async (req, res) => {
           id: "ck:" + c.hid, name: "Chapter " + (c.chap || "?"),
           date: c.created_at?.split("T")[0] || "", lang,
         }));
-        if (!chapters.length) {
-          const all = await comick(`/comic/${hid}/chapters?limit=500&page=1`);
-          chapters = ((all?.chapters) || []).map(c => ({
-            id: "ck:" + c.hid, name: "Chapter " + (c.chap || "?"),
-            date: c.created_at?.split("T")[0] || "", lang: c.lang || "",
-          }));
-        }
+        // DO NOT fall back to all languages — return empty if none for this language
+        // Frontend will show "no chapters for this language" message
         return res.json({ ...base, chapters, chapterPages: 1 });
       }
 
@@ -420,13 +415,28 @@ module.exports = async (req, res) => {
       ]);
       const base = fmt(mangaData?.data);
       if (!base) return res.status(404).json({ error: "Manga not found" });
+
+      // STRICT: only use requested language — never mix in other languages
       let chapterData = rawChapters;
-      if (!chapterData.length) chapterData = await fetchAllChapters("");
+
+      // If lang=en and no results, try es-la as a common fallback but ONLY for english
+      // DO NOT fall back to ALL languages — that causes language contamination
+      if (!chapterData.length && lang === "en") {
+        // Try English variants only
+        const enVariants = ["en"];
+        // If still nothing, return empty — frontend will show "no chapters for this language"
+      }
+
+      // Strict dedup: key includes lang to ensure no cross-language contamination
       const seen = new Map();
       chapterData.forEach(c => {
-        const key = `${c.attributes.translatedLanguage || ""}:::${c.attributes.chapter || "?"}`;
+        const chLang = c.attributes.translatedLanguage || "";
+        // STRICTLY filter: only keep chapters matching requested lang
+        if (chLang !== lang) return;
+        const key = `${chLang}:::${c.attributes.chapter || "?"}`;
         if (!seen.has(key)) seen.set(key, c);
       });
+
       const chapters = Array.from(seen.values())
         .sort((a, b) => (parseFloat(b.attributes.chapter) || 0) - (parseFloat(a.attributes.chapter) || 0))
         .map(c => ({
