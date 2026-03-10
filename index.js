@@ -352,34 +352,36 @@ module.exports = async (req, res) => {
         return res.json(images);
       }
 
-      /* MangaDex chapters — use retry */
-      const data = await mdxRetry(`/at-home/server/${id}`);
-      if (!data) return res.status(500).json({ error: "MangaDex at-home server unreachable", id });
-      if (!data.chapter) return res.status(500).json({ error: "MangaDex chapter data missing", id, keys: Object.keys(data) });
+      /* MangaDex chapters — try up to 3 different server nodes */
+      let data = null;
+      for (let attempt = 0; attempt < 3; attempt++) {
+        data = await mdx(`/at-home/server/${id}`);
+        if (data && data.chapter) break;
+        await new Promise(r => setTimeout(r, 600 * (attempt + 1)));
+      }
+
+      if (!data || !data.chapter) {
+        return res.status(500).json({ error: "MangaDex at-home server failed after 3 attempts", id });
+      }
 
       const baseUrl    = data.baseUrl;
       const hash       = data.chapter.hash;
       const fullFiles  = data.chapter.data || [];
       const saverFiles = data.chapter.dataSaver || [];
 
-      // Prefer dataSaver if full is empty (sometimes happens)
-      const useFiles  = fullFiles.length ? fullFiles : saverFiles;
-      const usePath   = fullFiles.length ? "data" : "data-saver";
-      const useHash   = hash;
+      const useFiles = fullFiles.length ? fullFiles : saverFiles;
+      const usePath  = fullFiles.length ? "data" : "data-saver";
 
-      if (!useFiles.length) return res.status(500).json({ error: "No pages found", id, chapter: data.chapter });
+      if (!useFiles.length) return res.status(500).json({ error: "No pages found", id });
 
-      const images = useFiles.map((f, i) => {
-        const direct   = `${baseUrl}/${usePath}/${useHash}/${f}`;
-        const saver    = saverFiles[i] && usePath === "data"
-                           ? `${baseUrl}/data-saver/${useHash}/${saverFiles[i]}`
-                           : null;
-        return {
-          img:      `/img?url=${encodeURIComponent(direct)}`,
-          fallback: saver ? `/img?url=${encodeURIComponent(saver)}` : null,
-          page:     i + 1,
-        };
-      });
+      // Return direct CDN URLs — browser loads them directly (faster, no proxy timeout)
+      const images = useFiles.map((f, i) => ({
+        img:      `${baseUrl}/${usePath}/${hash}/${f}`,
+        fallback: saverFiles[i] && usePath === "data"
+                    ? `${baseUrl}/data-saver/${hash}/${saverFiles[i]}`
+                    : null,
+        page: i + 1,
+      }));
 
       return res.json(images);
     }
