@@ -438,9 +438,65 @@ module.exports = async (req, res) => {
           return { id: rawId, ...info, latestChapter: chapters.at(-1)?.name || "", chapters, chapterPages: 1 };
         }
 
-        /* MangaDex */
+        /* MangaDex — fetch metadata from MDX, but use ComicK for chapter IDs
+           so that chapter images load reliably (MDX CDN blocks Vercel IPs).
+           Strategy:
+             1. Get manga info + title from MDX (cover, description, genres etc.)
+             2. Search ComicK for this title → get ComicK chapter list (ck: IDs)
+             3. If ComicK has chapters → return ck: chapter IDs (guaranteed to work)
+             4. If ComicK doesn't have it → fall back to mdx: chapter IDs          */
         const id = rawId.replace(/^mdx:/, "");
-        async function fetchChaps(langFilter) {
+
+        // Step 1: fetch MDX manga metadata
+        const mangaData = await mdx(`/manga/${id}?includes[]=cover_art`);
+        const base = fmt(mangaData?.data);
+        if (!base) return null;
+
+        // Step 2: try to find this manga on ComicK by title
+        async function fetchCkChapters(title) {
+          try {
+            const titleLow = title.toLowerCase().replace(/[^a-z0-9]/g, "");
+            const results  = await comick(`/v1.0/search?q=${encodeURIComponent(title)}&limit=5`);
+            if (!Array.isArray(results) || !results.length) return null;
+            // Pick best title match
+            const match = results.find(m => {
+              const t = (m.title || m.slug || "").toLowerCase().replace(/[^a-z0-9]/g, "");
+              return t === titleLow || t.includes(titleLow) || titleLow.includes(t);
+            }) || results[0];
+            const hid = match?.hid || match?.md_comics?.hid;
+            if (!hid) return null;
+            // Fetch chapters — try requested lang first, fall back to english
+            const ckChaps = await comick(`/comic/${hid}/chapters?lang=${lang}&limit=500&page=1`);
+            let chapters  = ckChaps?.chapters || [];
+            if (!chapters.length && lang !== "en") {
+              const ckEn  = await comick(`/comic/${hid}/chapters?lang=en&limit=500&page=1`);
+              chapters    = ckEn?.chapters || [];
+            }
+            if (!chapters.length) return null;
+            return chapters
+              .sort((a, b) => (parseFloat(a.chap) || 0) - (parseFloat(b.chap) || 0))
+              .reverse()
+              .map(c => ({
+                id:   "ck:" + c.hid,
+                name: "Chapter " + (c.chap || "?"),
+                date: c.created_at?.split("T")[0] || "",
+                lang: c.lang || lang,
+              }));
+          } catch (e) {
+            console.warn("CK chapter lookup failed:", e.message);
+            return null;
+          }
+        }
+
+        // Step 3: try ComicK chapters first
+        const ckChapters = await fetchCkChapters(base.title);
+        if (ckChapters && ckChapters.length) {
+          return { ...base, chapters: ckChapters, chapterPages: 1, chapterSource: "ComicK" };
+        }
+
+        // Step 4: ComicK didn't have it — fall back to MDX chapter IDs
+        console.log(`ComicK miss for "${base.title}", falling back to MDX chapters`);
+        async function fetchMdxChaps(langFilter) {
           const first = await mdx(`/manga/${id}/feed?limit=500&offset=0&order[chapter]=desc${langFilter}`);
           if (!first?.data) return [];
           let all = [...first.data];
@@ -450,15 +506,7 @@ module.exports = async (req, res) => {
           }
           return all;
         }
-
-        const [mangaData, rawChapters] = await Promise.all([
-          mdx(`/manga/${id}?includes[]=cover_art`),
-          fetchChaps(`&translatedLanguage[]=${lang}`),
-        ]);
-
-        const base = fmt(mangaData?.data);
-        if (!base) return null;
-
+        const rawChapters = await fetchMdxChaps(`&translatedLanguage[]=${lang}`);
         const seen = new Map();
         rawChapters.forEach(c => {
           const chLang = c.attributes.translatedLanguage || "";
@@ -466,11 +514,10 @@ module.exports = async (req, res) => {
           const key = `${chLang}:::${c.attributes.chapter || "?"}`;
           if (!seen.has(key)) seen.set(key, c);
         });
-
         const chapters = Array.from(seen.values())
           .sort((a, b) => (parseFloat(b.attributes.chapter) || 0) - (parseFloat(a.attributes.chapter) || 0))
           .map(c => ({
-            id: "mdx:" + c.id,
+            id:   "mdx:" + c.id,
             name: "Chapter " + (c.attributes.chapter || "?"),
             date: c.attributes.publishAt?.split("T")[0] || "",
             lang: c.attributes.translatedLanguage || "",
