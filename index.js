@@ -374,40 +374,57 @@ module.exports = async (req, res) => {
 
       if (!useFiles.length) return res.status(500).json({ error: "No pages found", id });
 
-      // Return direct CDN URLs — browser loads them directly (faster, no proxy timeout)
-      const images = useFiles.map((f, i) => ({
-        img:      `${baseUrl}/${usePath}/${hash}/${f}`,
-        fallback: saverFiles[i] && usePath === "data"
-                    ? `${baseUrl}/data-saver/${hash}/${saverFiles[i]}`
-                    : null,
-        page: i + 1,
-      }));
+      const images = useFiles.map((f, i) => {
+        const direct = `${baseUrl}/${usePath}/${hash}/${f}`;
+        const saver  = saverFiles[i] && usePath === "data"
+                         ? `${baseUrl}/data-saver/${hash}/${saverFiles[i]}`
+                         : null;
+        return {
+          img:      `/img?url=${encodeURIComponent(direct)}`,
+          fallback: saver ? `/img?url=${encodeURIComponent(saver)}` : null,
+          page:     i + 1,
+        };
+      });
 
       return res.json(images);
     }
 
-    /* IMAGE PROXY — stream to avoid buffering timeout */
+    /* IMAGE PROXY — stream with fallback to data-saver node */
     if (url === "/img") {
       const imgUrl = p.url;
       if (!imgUrl) return res.status(400).json({ error: "Missing url param" });
-      try {
-        const r = await http.get(imgUrl, {
+
+      async function tryFetch(target) {
+        const r = await http.get(target, {
           responseType: "stream",
           timeout: 8000,
-          headers: {
-            "Referer":    "https://mangadex.org/",
-            "User-Agent": "Mozilla/5.0",
-          },
+          headers: { "Referer": "https://mangadex.org/", "User-Agent": "Mozilla/5.0" },
         });
-        const ct = r.headers["content-type"] || "image/jpeg";
-        res.setHeader("Content-Type", ct);
-        res.setHeader("Cache-Control", "public, max-age=86400");
-        res.setHeader("Access-Control-Allow-Origin", "*");
-        r.data.pipe(res);
-        return;
-      } catch (e) {
-        return res.status(502).json({ error: "Image fetch failed", detail: e.message });
+        if (r.status === 404) throw new Error("404");
+        return r;
       }
+
+      // Try full quality, then swap to uploads.mangadex.org as stable fallback
+      const fallbackUrl = imgUrl.replace(/https:\/\/[^/]+\/data\//, "https://uploads.mangadex.org/data/")
+                                .replace(/https:\/\/[^/]+\/data-saver\//, "https://uploads.mangadex.org/data-saver/");
+
+      let r;
+      try {
+        r = await tryFetch(imgUrl);
+      } catch(e) {
+        try {
+          r = await tryFetch(fallbackUrl);
+        } catch(e2) {
+          return res.status(502).json({ error: "Image fetch failed on both nodes" });
+        }
+      }
+
+      const ct = r.headers["content-type"] || "image/jpeg";
+      res.setHeader("Content-Type", ct);
+      res.setHeader("Cache-Control", "public, max-age=86400");
+      res.setHeader("Access-Control-Allow-Origin", "*");
+      r.data.pipe(res);
+      return;
     }
 
     return res.status(404).json({ error:"Not found" });
