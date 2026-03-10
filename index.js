@@ -549,30 +549,97 @@ module.exports = async (req, res) => {
           /* MangaDex */
           const id = raw.replace(/^mdx:/, "");
 
-          // FIX: Validate UUID format — catches manga IDs being passed by mistake
+          // Validate UUID format — catches manga IDs being passed by mistake
           const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
           if (!UUID_RE.test(id)) {
             throw new Error(`Invalid chapter ID: "${id}". Expected a UUID chapter ID from the chapters list.`);
           }
 
-          // First attempt
+          // Helper: fetch pages from ComicK as a fallback when MDX fails.
+          // Looks up the chapter number + manga title from MDX metadata, then
+          // searches ComicK for a matching chapter.
+          async function tryComickFallback(mdxChapterId) {
+            try {
+              console.log(`Trying ComicK fallback for MDX chapter ${mdxChapterId}`);
+              // Get chapter metadata from MDX (title, chapter number, manga relationship)
+              const meta = await mdx(`/chapter/${mdxChapterId}?includes[]=manga`);
+              if (!meta?.data) return null;
+
+              const chNum  = meta.data.attributes?.chapter;
+              const lang   = meta.data.attributes?.translatedLanguage || "en";
+              const mangaRel = (meta.data.relationships || []).find(r => r.type === "manga");
+              const mangaId  = mangaRel?.id;
+              if (!chNum || !mangaId) return null;
+
+              // Get the manga title to search ComicK
+              const mangaMeta = await mdx(`/manga/${mangaId}?includes[]=cover_art`);
+              const titleObj  = mangaMeta?.data?.attributes?.title || {};
+              const title     = titleObj.en || titleObj["ja-ro"] || Object.values(titleObj)[0];
+              if (!title) return null;
+
+              // Search ComicK for this manga
+              const ckSearch = await comick(`/v1.0/search?q=${encodeURIComponent(title)}&limit=5`);
+              if (!Array.isArray(ckSearch) || !ckSearch.length) return null;
+
+              // Pick the best match (first result whose title closely matches)
+              const titleLow = title.toLowerCase().replace(/[^a-z0-9]/g, "");
+              const ckManga  = ckSearch.find(m => {
+                const t = (m.title || m.slug || "").toLowerCase().replace(/[^a-z0-9]/g, "");
+                return t === titleLow || t.includes(titleLow) || titleLow.includes(t);
+              }) || ckSearch[0];
+
+              const ckHid = ckManga?.hid || ckManga?.md_comics?.hid;
+              if (!ckHid) return null;
+
+              // Get chapters from ComicK for this manga
+              const ckChaps = await comick(`/comic/${ckHid}/chapters?lang=${lang}&limit=500&page=1`);
+              const chapters = ckChaps?.chapters || [];
+
+              // Find the chapter with matching number (exact first, then approximate)
+              let match = chapters.find(c => String(c.chap) === String(chNum))
+                       || chapters.find(c => parseFloat(c.chap) === parseFloat(chNum));
+              if (!match) return null;
+
+              // Fetch the ComicK chapter pages
+              const ckData = await comick(`/chapter/${match.hid}`);
+              if (!ckData) return null;
+              const imgList = (ckData.chapter?.md_images || ckData.chapter?.images || ckData.images || []);
+              if (!imgList.length) return null;
+
+              console.log(`ComicK fallback succeeded for "${title}" ch.${chNum} (hid: ${match.hid})`);
+              return imgList.map((img, i) => {
+                const key = typeof img === "string" ? img : (img.b2key || img.name || "");
+                return { img: `https://meo.comick.pictures/${key}`, page: i + 1, source: "ComicK (fallback)" };
+              }).filter(x => x.img !== "https://meo.comick.pictures/");
+            } catch (e) {
+              console.warn("ComicK fallback failed:", e.message);
+              return null;
+            }
+          }
+
+          // First attempt at MDX at-home server
           let data = await mdx(`/at-home/server/${id}`);
 
-          // FIX: Improved retry — 1s then 2s delay (was 400ms, not enough for MDX rate limits)
+          // Retry with 1s delay
           if (!data?.chapter) {
             console.warn(`MDX at-home miss for ${id}, retry 1 in 1s...`);
             await new Promise(r => setTimeout(r, 1000));
             data = await mdx(`/at-home/server/${id}`);
           }
 
+          // Retry with 2s delay
           if (!data?.chapter) {
             console.warn(`MDX at-home miss for ${id}, retry 2 in 2s...`);
             await new Promise(r => setTimeout(r, 2000));
             data = await mdx(`/at-home/server/${id}`);
           }
 
+          // All MDX attempts failed — try ComicK as fallback
           if (!data?.chapter) {
-            throw new Error(`MangaDex returned no data for chapter "${id}". It may have been removed or you passed a manga ID instead of a chapter ID.`);
+            console.warn(`MDX exhausted for ${id}, attempting ComicK fallback...`);
+            const fallbackPages = await tryComickFallback(id);
+            if (fallbackPages && fallbackPages.length) return fallbackPages;
+            throw new Error(`Chapter unavailable on MangaDex and ComicK fallback also failed. The chapter may have been removed by the publisher.`);
           }
 
           const baseUrl    = data.baseUrl;
@@ -583,7 +650,11 @@ module.exports = async (req, res) => {
           const usePath    = fullFiles.length ? "data" : "data-saver";
 
           if (!useFiles.length) {
-            throw new Error(`Chapter "${id}" has no image files.`);
+            // No files from MDX — also try ComicK fallback
+            console.warn(`MDX chapter ${id} has no image files, trying ComicK fallback...`);
+            const fallbackPages = await tryComickFallback(id);
+            if (fallbackPages && fallbackPages.length) return fallbackPages;
+            throw new Error(`Chapter "${id}" has no image files on MangaDex and ComicK fallback failed.`);
           }
 
           return useFiles.map((f, i) => {
