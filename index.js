@@ -341,7 +341,7 @@ module.exports = async (req, res) => {
       }
 
       /* MangaDex chapters — use retry */
-      const data = await mdxRetry(`/at-home/server/${id}`);
+      const data = await mdxRetry(`/at-home/server/${id}?forcePort443=true`);
       if (!data) return res.status(500).json({ error: "MangaDex at-home server unreachable", id });
       if (!data.chapter) return res.status(500).json({ error: "MangaDex chapter data missing", id, keys: Object.keys(data) });
 
