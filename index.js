@@ -1,7 +1,7 @@
 const axios = require("axios");
 const { URL } = require("url");
 
-const COMICK    = "https://api.comick.io";
+const COMICK    = "https://api.comick.fun";
 const BROWSER_UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36";
 const api = axios.create({ timeout: 10000 });
 
@@ -137,6 +137,21 @@ module.exports = async (req, res) => {
 
     /* ── ROOT ── */
     if (url === "/") return res.json({ status: "ok", source: "ComicK", cacheSize: cache.size });
+
+    /* ── DEBUG — raw ComicK responses (remove after diagnosis) ── */
+    if (url === "/debug") {
+      const [top, search] = await Promise.all([
+        ck(`/top?page=1`),
+        ck(`/v1.0/search?q=naruto&limit=3`),
+      ]);
+      return res.json({
+        top_keys:    top    ? Object.keys(top)                          : null,
+        top_rank_0:  top?.rank?.[0]  || top?.[0] || null,
+        top_sample:  JSON.stringify(top)?.slice(0, 500),
+        search_type: Array.isArray(search) ? "array" : typeof search,
+        search_0:    Array.isArray(search) ? search[0] : search,
+      });
+    }
 
     /* ── LIST ── */
     if (url === "/list" || url.startsWith("/list")) {
