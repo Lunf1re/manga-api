@@ -104,6 +104,15 @@ module.exports = async (req, res) => {
   try {
     if (url === "/") return res.json({ status:"ok", source:"Manganato" });
 
+    /* DEBUG */
+    if (url === "/debug-html") {
+      const html = await get(BASE + "/manga-list-all/1");
+      const $ = cheerio.load(html);
+      const classes = new Set();
+      $("[class]").each(function(_,el){ ($(el).attr("class")||"").split(/\s+/).forEach(function(c){ if(c) classes.add(c); }); });
+      return res.json({ classes:[...classes].slice(0,80), snippet: html.slice(0,3000) });
+    }
+
     /* LIST */
     if (url==="/list"||url.startsWith("/list")) {
       const page = Math.max(1,parseInt(p.page)||1);
